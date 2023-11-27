@@ -3,8 +3,6 @@ import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Server } from 'socket.io'
-import sqlite from 'sqlite3'
-import { open } from 'sqlite'
 
 // 开启多集群模式
 import { availableParallelism } from 'node:os'
@@ -24,20 +22,6 @@ if (cluster.isPrimary) {
   setupPrimary()
 } else {
   // 如果是子线程
-  // 打开数据库
-  const db = await open({
-    filename: 'chat.db',
-    driver: sqlite.Database
-  })
-
-  // 创建chat table
-  const table = db.exec(`
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client_offset TEXT UNIQUE,
-        content TEXT
-    );
-  `)
 
   const app = express()
   const server = createServer(app)
@@ -49,57 +33,29 @@ if (cluster.isPrimary) {
   const __dirname = dirname(fileURLToPath(import.meta.url))
 
   app.get('/', (req, res) => {
-    res.send('<h1>hello world</h1>')
-  })
-
-  app.get('/home', (req, res) => {
     res.sendFile(join(__dirname, 'index.html'))
   })
 
   io.on('connection', async (socket) => {
-    // socket就是一个连接里专属的实例，其他操作都要在这上面进行，而不是io
-    io.emit('chat message', `user ${socket.id} online`)
-    // 关闭当前这个用户的实例连接
+
+    let handshake = socket.handshake;
+
+    socket.broadcast.emit('chat', `user ${handshake.query.user} connected`)
     socket.on('disconnect', () => {
-      io.emit('chat message', `user ${socket.id} offline`)
+      socket.emit('chat message', `user ${socket.id} offline`)
     })
 
-    socket.on('chat message', async (msg, clientOffset, ack) => {
+    socket.on('chat', async (msg) => {
       console.log('msg', msg)
-      let result
-      try {
-        result = await db.run(`INSERT INTO messages (content, client_offset) VALUES (?, ?)`, msg, clientOffset)
-      } catch (error) {
-        if (error.errno === 19 /* SQLITE_CONSTRAINT */ ) {
-          // the message was already inserted, so we notify the client
-          ack();
-        } else {
-          // nothing to do, just let the client retry
-        }
-        return;
-      }
-      console.log('result', result)
-      io.emit('chat message', msg, result.lastID);
-      // 如果消息发送成功，要通知客户端，不然会一直重试
-      ack()
+      socket.broadcast.emit('chat', msg);
     })
-    if (!socket.recovered) {
-      try {
-        await db.each(`SELECT id, content FROM messages WHERE id > ?`,
-          [socket.handshake.auth.serverOffset || 0],
-          (_err, row) => {
-            console.log('row', row)
-            socket.emit('chat message', row.content, row.id);
-          }
-        )
-      } catch (error) {
-        
-      }
-    }
+
+    socket.on('typing', async (user) => {
+      socket.broadcast.emit('typing', user);
+    })
   })
 
   // 根据CPU核数 3000-30xx 端口都可以访问
-
   const port = process.env.PORT || 3002
 
   server.listen(port, () => {
